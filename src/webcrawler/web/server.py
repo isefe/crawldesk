@@ -233,44 +233,7 @@ class CrawlerWebHandler(BaseHTTPRequestHandler):
             if status is None:
                 detail = f"<section class='panel'><p>Crawler not found: {html.escape(crawler_id)}</p></section>"
             else:
-                visited_rows = []
-                for idx, item in enumerate(status.get("visit_trace", []), start=1):
-                    visited_rows.append(
-                        f"<tr><td>{idx}</td><td class='trace-url'>{html.escape(item['url'])}</td><td>{item['depth']}</td><td>{item['status_code'] or '-'}</td></tr>"
-                    )
-                event_rows = []
-                for item in status.get("event_log", []):
-                    event_rows.append(
-                        "<tr>"
-                        f"<td>{item.get('event_order', '')}</td>"
-                        f"<td>{html.escape(_human_event_name(str(item.get('event_type', ''))))}</td>"
-                        f"<td class='trace-url'>{html.escape(str(item.get('url', '')))}</td>"
-                        f"<td>{item.get('depth', '')}</td>"
-                        f"<td>{html.escape(str(item.get('source', item.get('error', ''))))}</td>"
-                        "</tr>"
-                    )
-                detail = f"""
-                <section class="panel" id="detail">
-                  <h2>Crawler Details</h2>
-                  <div class="timeline">
-                    <div>Created: {_format_dt(status.get("created_at"))}</div>
-                    <div>Started: {_format_dt(status.get("started_at"))}</div>
-                    <div>Finished: {_format_dt(status.get("finished_at"))}</div>
-                  </div>
-                </section>
-                <section class="panel">
-                  <h3>Visited URLs</h3>
-                  <div class="table-scroll">
-                    <table><thead><tr><th>#</th><th>URL</th><th>Depth</th><th>Status</th></tr></thead><tbody>{''.join(visited_rows)}</tbody></table>
-                  </div>
-                </section>
-                <section class="panel" id="event-log">
-                  <h3>Activity Log</h3>
-                  <div class="table-scroll">
-                    <table><thead><tr><th>#</th><th>Event</th><th>URL</th><th>Depth</th><th>Info</th></tr></thead><tbody>{''.join(event_rows)}</tbody></table>
-                  </div>
-                </section>
-                """
+                detail = self._crawler_detail_html(status)
 
         filters = f"""
         <form method="get" action="/status" class="status-filters">
@@ -355,6 +318,80 @@ class CrawlerWebHandler(BaseHTTPRequestHandler):
             "<table><thead><tr><th>ID</th><th>State</th><th>Origin</th><th>Created</th></tr></thead>"
             f"<tbody>{''.join(rows)}</tbody></table></section>"
         )
+
+    def _crawler_detail_html(self, status: dict[str, Any]) -> str:
+        summary_items = [
+            ("State", str(status.get("state", "-")), "state"),
+            ("Visited", str(status.get("pages_crawled", 0)), "pages_crawled"),
+            ("Indexed", str(status.get("pages_indexed", 0)), "pages_indexed"),
+            ("Failed", str(status.get("pages_failed", 0)), "pages_failed"),
+            ("Queue", str(status.get("queue_size", 0)), "queue_size"),
+            ("Current URL", str(status.get("current_url") or "-"), "current_url"),
+        ]
+        summary_cards = "".join(
+            "<div class='kpi'>"
+            f"<div class='kpi-title'>{html.escape(label)}</div>"
+            f"<div class='kpi-value detail-value detail-{html.escape(key)}'>{html.escape(value)}</div>"
+            "</div>"
+            for label, value, key in summary_items
+        )
+        return f"""
+        <section class="panel" id="detail">
+          <div class="panel-title-row">
+            <h2>Crawler Details</h2>
+            <div class="detail-actions">
+              <label class="live-toggle"><input type="checkbox" id="auto-refresh-toggle" checked /> Auto Refresh</label>
+              <button type="button" id="refresh-detail-btn" class="action-btn">Refresh Now</button>
+            </div>
+          </div>
+          <div class="timeline">
+            <div>Created: <span class="detail-created_at">{html.escape(_format_dt(status.get("created_at")))}</span></div>
+            <div>Started: <span class="detail-started_at">{html.escape(_format_dt(status.get("started_at")))}</span></div>
+            <div>Finished: <span class="detail-finished_at">{html.escape(_format_dt(status.get("finished_at")))}</span></div>
+          </div>
+          <div class="kpis detail-kpis">{summary_cards}</div>
+        </section>
+        <section class="panel">
+          <h3>Visited URLs</h3>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>#</th><th>URL</th><th>Depth</th><th>Status</th></tr></thead>
+              <tbody id="visit-trace-body">{self._visit_rows_html(status.get("visit_trace", []))}</tbody>
+            </table>
+          </div>
+        </section>
+        <section class="panel" id="event-log">
+          <h3>Activity Log</h3>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>#</th><th>Event</th><th>URL</th><th>Depth</th><th>Info</th></tr></thead>
+              <tbody id="event-log-body">{self._event_rows_html(status.get("event_log", []))}</tbody>
+            </table>
+          </div>
+        </section>
+        """
+
+    def _visit_rows_html(self, visit_trace: list[dict[str, Any]]) -> str:
+        rows = []
+        for idx, item in enumerate(visit_trace, start=1):
+            rows.append(
+                f"<tr><td>{idx}</td><td class='trace-url'>{html.escape(str(item.get('url', '')))}</td><td>{item.get('depth', '')}</td><td>{item.get('status_code') or '-'}</td></tr>"
+            )
+        return "".join(rows) or "<tr><td colspan='4' class='muted'>No visited URLs yet.</td></tr>"
+
+    def _event_rows_html(self, event_log: list[dict[str, Any]]) -> str:
+        rows = []
+        for item in event_log:
+            rows.append(
+                "<tr>"
+                f"<td>{item.get('event_order', '')}</td>"
+                f"<td>{html.escape(_human_event_name(str(item.get('event_type', ''))))}</td>"
+                f"<td class='trace-url'>{html.escape(str(item.get('url', '')))}</td>"
+                f"<td>{item.get('depth', '')}</td>"
+                f"<td>{html.escape(str(item.get('source', item.get('error', ''))))}</td>"
+                "</tr>"
+            )
+        return "".join(rows) or "<tr><td colspan='5' class='muted'>No activity yet.</td></tr>"
 
     def _flash_html(self, flash: str) -> str:
         text_map = {
@@ -681,6 +718,37 @@ class CrawlerWebHandler(BaseHTTPRequestHandler):
             .mobile-nav {{
               display: none;
             }}
+            .detail-actions {{
+              display: flex;
+              align-items: center;
+              gap: 10px;
+            }}
+            .live-toggle {{
+              display: flex;
+              align-items: center;
+              gap: 8px;
+              color: var(--muted);
+              font-size: 13px;
+              white-space: nowrap;
+            }}
+            .live-toggle input {{
+              width: auto;
+              margin: 0;
+            }}
+            .detail-kpis {{
+              margin-top: 14px;
+              margin-bottom: 0;
+            }}
+            .detail-value {{
+              font-size: 18px;
+            }}
+            .detail-current_url {{
+              font-size: 14px;
+              line-height: 1.45;
+              word-break: break-word;
+              overflow-wrap: anywhere;
+              white-space: normal;
+            }}
             .site-signature {{
               text-align: center;
               color: var(--muted);
@@ -711,6 +779,10 @@ class CrawlerWebHandler(BaseHTTPRequestHandler):
               }}
               .timeline {{
                 grid-template-columns: 1fr;
+              }}
+              .detail-actions {{
+                width: 100%;
+                justify-content: space-between;
               }}
               .mobile-nav {{
                 position: fixed;
@@ -804,8 +876,90 @@ class CrawlerWebHandler(BaseHTTPRequestHandler):
               refreshOverview();
               const page = document.body.getAttribute("data-page");
               const crawlerId = document.body.getAttribute("data-crawler-id");
+              const autoRefreshToggle = document.getElementById("auto-refresh-toggle");
+              const refreshDetailBtn = document.getElementById("refresh-detail-btn");
+              function humanEventName(eventType) {{
+                const mapping = {{
+                  queue_enqueue: "Added to queue",
+                  queue_restored: "Restored from checkpoint",
+                  queue_drop_backpressure: "Dropped due to backpressure",
+                  visit_start: "Visit started",
+                  visit_done: "Visit completed",
+                  visit_error: "Visit failed"
+                }};
+                return mapping[eventType] || eventType || "-";
+              }}
+              function escapeHtml(value) {{
+                return String(value ?? "")
+                  .replace(/&/g, "&amp;")
+                  .replace(/</g, "&lt;")
+                  .replace(/>/g, "&gt;")
+                  .replace(/"/g, "&quot;")
+                  .replace(/'/g, "&#39;");
+              }}
+              function formatDate(value) {{
+                if (!value) return "-";
+                const d = new Date(value);
+                return isNaN(d.getTime()) ? value : d.toLocaleString();
+              }}
+              function setDetailValue(key, value) {{
+                const el = document.querySelector(`.detail-${{key}}`);
+                if (el) el.textContent = value ?? "-";
+              }}
+              function renderVisitTrace(items) {{
+                const body = document.getElementById("visit-trace-body");
+                if (!body) return;
+                if (!items || !items.length) {{
+                  body.innerHTML = "<tr><td colspan='4' class='muted'>No visited URLs yet.</td></tr>";
+                  return;
+                }}
+                body.innerHTML = items.map((item, index) =>
+                  `<tr><td>${{index + 1}}</td><td class="trace-url">${{escapeHtml(item.url || "")}}</td><td>${{item.depth ?? ""}}</td><td>${{item.status_code ?? "-"}}</td></tr>`
+                ).join("");
+              }}
+              function renderEventLog(items) {{
+                const body = document.getElementById("event-log-body");
+                if (!body) return;
+                if (!items || !items.length) {{
+                  body.innerHTML = "<tr><td colspan='5' class='muted'>No activity yet.</td></tr>";
+                  return;
+                }}
+                body.innerHTML = items.map(item =>
+                  `<tr><td>${{item.event_order ?? ""}}</td><td>${{escapeHtml(humanEventName(item.event_type))}}</td><td class="trace-url">${{escapeHtml(item.url || "")}}</td><td>${{item.depth ?? ""}}</td><td>${{escapeHtml(item.source || item.error || "")}}</td></tr>`
+                ).join("");
+              }}
+              async function refreshCrawlerDetail() {{
+                if (!(page === "status" && crawlerId)) return;
+                try {{
+                  const res = await fetch(`/api/status?id=${{encodeURIComponent(crawlerId)}}`, {{ cache: "no-store" }});
+                  if (!res.ok) return;
+                  const data = await res.json();
+                  setDetailValue("state", data.state || "-");
+                  setDetailValue("pages_crawled", data.pages_crawled ?? 0);
+                  setDetailValue("pages_indexed", data.pages_indexed ?? 0);
+                  setDetailValue("pages_failed", data.pages_failed ?? 0);
+                  setDetailValue("queue_size", data.queue_size ?? 0);
+                  setDetailValue("current_url", data.current_url || "-");
+                  const createdAt = document.querySelector(".detail-created_at");
+                  const startedAt = document.querySelector(".detail-started_at");
+                  const finishedAt = document.querySelector(".detail-finished_at");
+                  if (createdAt) createdAt.textContent = formatDate(data.created_at);
+                  if (startedAt) startedAt.textContent = formatDate(data.started_at);
+                  if (finishedAt) finishedAt.textContent = formatDate(data.finished_at);
+                  renderVisitTrace(data.visit_trace || []);
+                  renderEventLog(data.event_log || []);
+                  if (autoRefreshToggle && data.state !== "running") {{
+                    autoRefreshToggle.checked = false;
+                  }}
+                }} catch (_e) {{}}
+              }}
+              refreshDetailBtn?.addEventListener("click", refreshCrawlerDetail);
               if (page === "status" && crawlerId) {{
-                setInterval(() => window.location.reload(), 8000);
+                setInterval(() => {{
+                  if (autoRefreshToggle?.checked) {{
+                    refreshCrawlerDetail();
+                  }}
+                }}, 4000);
               }}
             }})();
           </script>

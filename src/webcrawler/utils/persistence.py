@@ -14,7 +14,7 @@ class JsonStateStore(StateStore):
 
     def save(self, seen: set[str], pending: list[CrawlTask]) -> None:
         payload = {
-            "seen": sorted(seen),
+            "seen": list(seen),
             "pending": [
                 {
                     "url": task.url,
@@ -25,7 +25,9 @@ class JsonStateStore(StateStore):
                 for task in pending
             ],
         }
-        self.checkpoint_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2))
+        temp_path = self.checkpoint_path.with_suffix(self.checkpoint_path.suffix + ".tmp")
+        temp_path.write_text(json.dumps(payload, ensure_ascii=True, separators=(",", ":")))
+        temp_path.replace(self.checkpoint_path)
 
     def load(self) -> tuple[set[str], list[CrawlTask]]:
         if not self.checkpoint_path.exists():

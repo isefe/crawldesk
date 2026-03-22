@@ -40,6 +40,8 @@ class WebCrawlerService:
         self._active_workers = 0
         self._visit_order = 0
         self._event_order = 0
+        self._pages_since_checkpoint = 0
+        self._last_progress_logged = 0
         self._stop_event = asyncio.Event()
         self.event_sink: Callable[[dict[str, Any]], None] | None = None
 
@@ -62,12 +64,17 @@ class WebCrawlerService:
         self._active_workers = 0
         self._visit_order = 0
         self._event_order = 0
+        self._pages_since_checkpoint = 0
+        self._last_progress_logged = 0
         self._stop_event = asyncio.Event()
         crawl_run_id = self.page_storage.start_run(
             origin=normalized_origin,
             max_depth=max_depth,
             crawl_run_id=crawl_run_id,
         )
+
+        logger.info("Crawl started: %s", normalized_origin)
+        logger.info("Plan: depth %s, up to %s pages", max_depth, self.config.max_pages)
 
         self.index_storage.initialize()
         self._bootstrap(origin=normalized_origin, resume=resume)
@@ -86,6 +93,7 @@ class WebCrawlerService:
         self._save_checkpoint()
         self.page_storage.finish_run(crawl_run_id)
         self.status_service.mark_stopped()
+        self._log_summary(crawl_run_id, outcome="completed")
 
     def _bootstrap(self, origin: str, resume: bool) -> None:
         if resume:
@@ -144,6 +152,7 @@ class WebCrawlerService:
                 await rate_limiter.acquire()
                 result = await self.fetcher.fetch(task)
                 self._increase_crawled_counter()
+                self._pages_since_checkpoint += 1
                 visit_order = self._next_visit_order()
                 self.page_storage.add_page(
                     CrawledPage(
@@ -165,8 +174,8 @@ class WebCrawlerService:
                         extra={"error": result.error, "status_code": result.status_code},
                     )
                     if result.error != "unsupported-content-type":
-                        logger.warning("Fetch failed for %s: %s", task.url, result.error)
                         self.status_service.mark_page_failed()
+                        self._log_failure(task.url)
                     continue
 
                 self.index_storage.upsert_document(
@@ -178,6 +187,7 @@ class WebCrawlerService:
                     )
                 )
                 self.status_service.mark_page_indexed()
+                self._log_progress()
                 self._emit_event(
                     event_type="visit_done",
                     url=task.url,
@@ -216,7 +226,7 @@ class WebCrawlerService:
                 self.status_service.update_seen_count(len(self.scheduler.seen_urls()))
                 if self._reached_page_limit():
                     self._stop_event.set()
-                self._save_checkpoint()
+                self._maybe_save_checkpoint(force=self._stop_event.is_set() or self._is_fully_idle())
 
     def _set_worker_activity(self, increase: bool) -> None:
         with self._counter_lock:
@@ -268,3 +278,49 @@ class WebCrawlerService:
     def _is_fully_idle(self) -> bool:
         with self._counter_lock:
             return self.scheduler.queue_size() == 0 and self._active_workers == 0
+
+    def _log_progress(self) -> None:
+        status = self.status_service.snapshot()
+        visited = int(status.get("pages_crawled", 0))
+        if visited < 3:
+            should_log = True
+        else:
+            should_log = visited - self._last_progress_logged >= 5
+        if not should_log:
+            return
+        self._last_progress_logged = visited
+        logger.info(
+            "Progress: %s/%s pages, %s indexed, %s failed, %s waiting",
+            visited,
+            self.config.max_pages,
+            status.get("pages_indexed", 0),
+            status.get("pages_failed", 0),
+            status.get("queue_size", 0),
+        )
+
+    def _log_failure(self, url: str) -> None:
+        short_url = url if len(url) <= 90 else f"{url[:87]}..."
+        logger.info("Skipped: %s", short_url)
+
+    def _log_summary(self, crawl_run_id: str, *, outcome: str) -> None:
+        status = self.status_service.snapshot()
+        if outcome == "completed":
+            logger.info(
+                "Crawl finished: %s pages checked, %s indexed, %s failed",
+                status.get("pages_crawled", 0),
+                status.get("pages_indexed", 0),
+                status.get("pages_failed", 0),
+            )
+            return
+        logger.info(
+            "Crawl stopped: %s pages checked, %s indexed, %s failed",
+            status.get("pages_crawled", 0),
+            status.get("pages_indexed", 0),
+            status.get("pages_failed", 0),
+        )
+
+    def _maybe_save_checkpoint(self, *, force: bool = False) -> None:
+        if not force and self._pages_since_checkpoint < self.config.checkpoint_every_pages:
+            return
+        self._save_checkpoint()
+        self._pages_since_checkpoint = 0

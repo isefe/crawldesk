@@ -105,9 +105,9 @@ Result: you can stop and restart the app without losing indexed knowledge or cra
 
 Main pages:
 
-- `/crawler/new` → create crawlers and review recent jobs
-- `/search` → Google-style search page with optional domain filter
-- `/status` → crawler list, detailed logs, visited URLs, lifecycle metadata
+- `/crawler/new` -> create crawlers and review recent jobs
+- `/search` -> Google-style search page with optional domain filter
+- `/status` -> crawler list, detailed logs, visited URLs, lifecycle metadata
 
 UI is fully English, dark-mode first, and tuned for operational clarity.
 
@@ -116,12 +116,23 @@ UI is fully English, dark-mode first, and tuned for operational clarity.
 ## Installation & Run
 
 ```bash
-cd /home/istemihan/Desktop/codex
-python3 -m venv .venv
+cd /path/to/crawldesk
+python -m venv .venv
 source .venv/bin/activate
-pip install --upgrade pip
+python -m pip install --upgrade pip
 pip install -r requirements.txt
-./run.sh
+python app.py
+```
+
+Windows PowerShell:
+
+```powershell
+cd C:\path\to\crawldesk
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+python app.py
 ```
 
 Open:
@@ -136,26 +147,26 @@ Open:
 ### Start full web app
 
 ```bash
-./run.sh
+python app.py
 ```
 
 Optional:
 
 ```bash
-./run.sh --open-browser
-./run.sh --port 8090
+python app.py start --open-browser
+python app.py start --port 8090
 ```
 
 ### Start via Python module
 
 ```bash
-PYTHONPATH=src python -m webcrawler.main start
+python app.py start
 ```
 
 ### Run an indexing job
 
 ```bash
-PYTHONPATH=src python -m webcrawler.main index \
+python app.py index \
   --origin https://www.python.org \
   --max-depth 1 \
   --max-pages 30 \
@@ -165,7 +176,7 @@ PYTHONPATH=src python -m webcrawler.main index \
 ### Search indexed data
 
 ```bash
-PYTHONPATH=src python -m webcrawler.main search \
+python app.py search \
   --query tutorial \
   --limit 10 \
   --domain python.org
@@ -174,7 +185,7 @@ PYTHONPATH=src python -m webcrawler.main search \
 ### Runtime status
 
 ```bash
-PYTHONPATH=src python -m webcrawler.main status
+python app.py status
 ```
 
 ---
@@ -183,9 +194,14 @@ PYTHONPATH=src python -m webcrawler.main status
 
 ```text
 .
+├── app.py
 ├── data/
-├── run.sh
 ├── product_prd.md
+├── README.md
+├── requirements.txt
+├── run.bat
+├── run.ps1
+├── run.sh
 ├── src/
 │   └── webcrawler/
 │       ├── app.py
@@ -221,7 +237,7 @@ PYTHONPATH=src python -m webcrawler.main status
 ## Test
 
 ```bash
-PYTHONPATH=src python -m unittest discover -s tests -p "test_*.py" -v
+python -m unittest discover -s tests -p "test_*.py" -v
 ```
 
 ---

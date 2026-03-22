@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -13,6 +14,8 @@ from uuid import uuid4
 from webcrawler.app import App
 from webcrawler.config import AppConfig
 from webcrawler.index.sqlite_storage import SQLiteIndexStorage
+
+logger = logging.getLogger(__name__)
 
 
 def _utc_now_iso() -> str:
@@ -369,6 +372,7 @@ class CrawlerManager:
             worker_count=worker_count,
             queue_capacity=queue_capacity,
             max_content_chars=self._base_config.max_content_chars,
+            checkpoint_every_pages=self._base_config.checkpoint_every_pages,
             user_agent=self._base_config.user_agent,
             index_db_path=self._base_config.index_db_path,
             checkpoint_path=checkpoint_path,
@@ -390,6 +394,7 @@ class CrawlerManager:
         with self._lock:
             self._jobs[crawler_id] = job
         self._upsert_job(job, keep_created_if_exists=True)
+        logger.info("Crawler created")
         thread.start()
 
     def _run_job(self, crawler_id: str, resume: bool) -> None:
@@ -411,6 +416,7 @@ class CrawlerManager:
             job.state = "failed"
             job.error = str(exc)
             job.finished_at = _utc_now_iso()
+            logger.info("Crawl failed: %s", job.error)
         finally:
             self._upsert_job(job)
 
@@ -584,6 +590,7 @@ class CrawlerManager:
                     worker_count=int(row[6]),
                     queue_capacity=int(row[8]),
                     max_content_chars=self._base_config.max_content_chars,
+                    checkpoint_every_pages=self._base_config.checkpoint_every_pages,
                     user_agent=self._base_config.user_agent,
                     index_db_path=self._base_config.index_db_path,
                     checkpoint_path=Path(row[9]),

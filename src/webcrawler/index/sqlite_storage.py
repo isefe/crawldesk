@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from threading import RLock
 
 from webcrawler.index.storage import BaseIndexStorage
 from webcrawler.models import Document, SearchHit
@@ -12,14 +13,26 @@ class SQLiteIndexStorage(BaseIndexStorage):
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn: sqlite3.Connection | None = None
+        self._lock = RLock()
+        self._initialized = False
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=5.0)
-        conn.execute("PRAGMA journal_mode=WAL;")
-        return conn
+        with self._lock:
+            if self._conn is None:
+                conn = sqlite3.connect(self.db_path, timeout=5.0, check_same_thread=False)
+                conn.execute("PRAGMA journal_mode=WAL;")
+                conn.execute("PRAGMA synchronous=NORMAL;")
+                conn.execute("PRAGMA temp_store=MEMORY;")
+                conn.execute("PRAGMA foreign_keys=ON;")
+                self._conn = conn
+            return self._conn
 
     def initialize(self) -> None:
-        with self._connect() as conn:
+        with self._lock:
+            if self._initialized:
+                return
+            conn = self._connect()
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS documents (
@@ -38,9 +51,11 @@ class SQLiteIndexStorage(BaseIndexStorage):
             if "crawl_run_id" not in columns:
                 conn.execute("ALTER TABLE documents ADD COLUMN crawl_run_id TEXT")
             conn.commit()
+            self._initialized = True
 
     def upsert_document(self, document: Document) -> None:
-        with self._connect() as conn:
+        with self._lock:
+            conn = self._connect()
             conn.execute(
                 """
                 INSERT INTO documents(url, title, content, crawl_run_id, indexed_at)
@@ -91,7 +106,8 @@ class SQLiteIndexStorage(BaseIndexStorage):
             params.append(f"{indexed_to.strip()}T23:59:59")
 
         where_sql = " AND ".join(where_parts)
-        with self._connect() as conn:
+        with self._lock:
+            conn = self._connect()
             rows = conn.execute(
                 f"""
                 SELECT url, title, content
@@ -111,12 +127,14 @@ class SQLiteIndexStorage(BaseIndexStorage):
         return hits
 
     def count_documents(self) -> int:
-        with self._connect() as conn:
+        with self._lock:
+            conn = self._connect()
             row = conn.execute("SELECT COUNT(*) FROM documents").fetchone()
         return int(row[0] if row else 0)
 
     def count_words(self) -> int:
-        with self._connect() as conn:
+        with self._lock:
+            conn = self._connect()
             rows = conn.execute("SELECT content FROM documents").fetchall()
         total = 0
         for (content,) in rows:

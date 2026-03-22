@@ -2,4 +2,4 @@
 set -euo pipefail
 
 cd "$(dirname "$0")"
-PYTHONPATH=src python -m webcrawler.main start "$@"
+python app.py start "$@"
