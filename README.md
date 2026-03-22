@@ -116,20 +116,13 @@ UI is fully English, dark-mode first, and tuned for operational clarity.
 ## Installation & Run
 
 ```bash
-cd /path/to/crawldesk
+cd crawldesk
 python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-python app.py
 ```
 
-Windows PowerShell:
+Activate the virtual environment with the command appropriate for your shell, then run:
 
-```powershell
-cd C:\path\to\crawldesk
-python -m venv .venv
-.venv\Scripts\Activate.ps1
+```bash
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 python app.py
