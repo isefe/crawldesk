@@ -1,0 +1,2 @@
+"""Index storage components."""
+
