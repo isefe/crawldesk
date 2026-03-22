@@ -165,7 +165,7 @@ def _start_launcher(
         run_web_server(config=config, host=host, port=port)
     except KeyboardInterrupt:
         print("\nShutting down CrawlDesk...")
-        print("Bye! You can restart anytime with ./run.sh\n")
+        print("Bye! You can restart anytime\n")
 
 
 def _pick_available_port(*, host: str, start_port: int, max_port_tries: int) -> int:
