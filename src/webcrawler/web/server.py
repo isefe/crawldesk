@@ -63,6 +63,28 @@ class CrawlerWebHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
 
+        if parsed.path == "/search/random":
+            word = self.manager.random_word()
+            if word is None:
+                self._send_json(404, {"error": "no-indexed-content"})
+                return
+            self._send_json(200, {"word": word})
+            return
+        if parsed.path == "/crawler/list":
+            crawlers = self.manager.list_crawlers()
+            self._send_json(200, {"crawlers": crawlers, "count": len(crawlers)})
+            return
+        if parsed.path == "/crawler/stats":
+            self._send_json(200, self.manager.get_overview())
+            return
+        if parsed.path.startswith("/crawler/status/"):
+            crawler_id = parsed.path.removeprefix("/crawler/status/").strip()
+            status = self.manager.get_crawler_status(crawler_id) if crawler_id else None
+            if status is None:
+                self._send_json(404, {"error": "crawler-not-found"})
+                return
+            self._send_json(200, status)
+            return
         if parsed.path == "/api/overview":
             self._send_json(200, self.manager.get_overview())
             return
@@ -78,15 +100,98 @@ class CrawlerWebHandler(BaseHTTPRequestHandler):
             self._render_new_crawler_page(flash=query.get("flash", [""])[0])
             return
         if parsed.path == "/search":
+            if self._is_api_search_request(query):
+                self._handle_search_api(query)
+                return
             self._render_search_page(query_params=query)
             return
         if parsed.path == "/status":
-            self._render_status_page(query_params=query)
+            self._render_status_page(flash=query.get("flash", [""])[0])
+            return
+        if parsed.path.startswith("/status/"):
+            crawler_id = parsed.path.removeprefix("/status/").strip()
+            self._render_crawler_status_page(crawler_id=crawler_id, flash=query.get("flash", [""])[0])
             return
         self._send_html(404, self._layout("Not Found", "<h2>Not Found</h2>", active_nav=""))
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path == "/crawler/pause":
+            form = self._read_form()
+            crawler_id = (form.get("crawler_id", [""])[0] or "").strip()
+            ok = self.manager.pause_crawler(crawler_id) if crawler_id else False
+            self.send_response(303)
+            self.send_header(
+                "Location",
+                f"/status/{crawler_id}?flash=" + ("paused" if ok else "pause_failed"),
+            )
+            self.end_headers()
+            return
+        if parsed.path == "/crawler/resume":
+            form = self._read_form()
+            crawler_id = (form.get("crawler_id", [""])[0] or "").strip()
+            ok = self.manager.resume_crawler(crawler_id) if crawler_id else False
+            self.send_response(303)
+            self.send_header(
+                "Location",
+                f"/status/{crawler_id}?flash=" + ("resumed" if ok else "resume_failed"),
+            )
+            self.end_headers()
+            return
+        if parsed.path == "/crawler/stop":
+            form = self._read_form()
+            crawler_id = (form.get("crawler_id", [""])[0] or "").strip()
+            ok = self.manager.stop_crawler(crawler_id) if crawler_id else False
+            self.send_response(303)
+            self.send_header(
+                "Location",
+                f"/status/{crawler_id}?flash=" + ("stopped" if ok else "stop_failed"),
+            )
+            self.end_headers()
+            return
+        if parsed.path == "/crawler/create":
+            payload = self._read_json()
+            crawler_id = self.manager.create_crawler(
+                origin=str(payload.get("origin") or self.default_config.origin_url).strip(),
+                max_depth=_as_int(str(payload.get("max_depth") or ""), self.default_config.max_depth, minimum=0),
+                max_pages=_as_int(str(payload.get("max_urls_to_visit") or ""), self.default_config.max_pages, minimum=1),
+                requests_per_second=_as_float(
+                    str(payload.get("hit_rate") or ""),
+                    self.default_config.requests_per_second,
+                    minimum=0.1,
+                ),
+                queue_capacity=_as_int(
+                    str(payload.get("max_queue_capacity") or ""),
+                    self.default_config.queue_capacity,
+                    minimum=1,
+                ),
+            )
+            self._send_json(201, {"crawler_id": crawler_id, "state": "running"})
+            return
+        if parsed.path == "/crawler/clear":
+            ok = self.manager.clear_all_data()
+            self._send_json(200, {"ok": ok})
+            return
+        if parsed.path.startswith("/crawler/pause/"):
+            crawler_id = parsed.path.removeprefix("/crawler/pause/").strip()
+            ok = self.manager.pause_crawler(crawler_id) if crawler_id else False
+            self._send_json(200 if ok else 404, {"ok": ok, "crawler_id": crawler_id})
+            return
+        if parsed.path.startswith("/crawler/resume/"):
+            crawler_id = parsed.path.removeprefix("/crawler/resume/").strip()
+            ok = self.manager.resume_crawler(crawler_id) if crawler_id else False
+            self._send_json(200 if ok else 404, {"ok": ok, "crawler_id": crawler_id})
+            return
+        if parsed.path.startswith("/crawler/stop/"):
+            crawler_id = parsed.path.removeprefix("/crawler/stop/").strip()
+            ok = self.manager.stop_crawler(crawler_id) if crawler_id else False
+            self._send_json(200 if ok else 404, {"ok": ok, "crawler_id": crawler_id})
+            return
+        if parsed.path.startswith("/crawler/resume-from-files/"):
+            crawler_id = parsed.path.removeprefix("/crawler/resume-from-files/").strip()
+            ok = self.manager.resume_from_files(crawler_id) if crawler_id else False
+            self._send_json(200 if ok else 404, {"ok": ok, "crawler_id": crawler_id})
+            return
         if parsed.path == "/data/clear":
             ok = self.manager.clear_all_data()
             self.send_response(303)
@@ -122,7 +227,7 @@ class CrawlerWebHandler(BaseHTTPRequestHandler):
             ),
         )
         self.send_response(303)
-        self.send_header("Location", f"/status?id={crawler_id}&flash=started")
+        self.send_header("Location", f"/status/{crawler_id}?flash=started")
         self.end_headers()
 
     def log_message(self, format: str, *args) -> None:  # noqa: A003
@@ -175,94 +280,85 @@ class CrawlerWebHandler(BaseHTTPRequestHandler):
         for hit in hits:
             rows.append(
                 f"""
-                <article class="result">
-                  <a class="title" href="{html.escape(hit["url"])}" target="_blank" rel="noreferrer">{html.escape(hit["title"])}</a>
-                  <div class="url">{html.escape(hit["url"])}</div>
-                  <div class="snippet">{html.escape(hit["snippet"])}</div>
+                <article class="search-hit">
+                  <div class="hit-url">{html.escape(hit["url"])}</div>
+                  <a class="hit-title" href="{html.escape(hit["url"])}" target="_blank" rel="noreferrer">{html.escape(hit["title"])}</a>
+                  <div class="hit-snippet">{html.escape(hit["snippet"])}</div>
                 </article>
                 """
             )
         results_html = "".join(rows) if rows else ("<p class='muted'>No results.</p>" if q.strip() else "")
+        search_shell_class = "search-shell search-shell-home" if not q.strip() else "search-shell"
         body = f"""
-        <section class="panel search-hero">
-          <h1 class="brand-search">Search</h1>
-          <form method="get" action="/search" class="search-controls">
-            <input name="q" value="{html.escape(q)}" placeholder="Search the index..." />
+        <section class="{search_shell_class}">
+          <div class="search-brand">Crawl<span>Search</span></div>
+          <form method="get" action="/search" class="search-google-bar">
+            <input name="q" value="{html.escape(q)}" placeholder="Search the index..." autocomplete="off" />
+            <input type="hidden" name="domain" value="{html.escape(domain)}" />
             <button type="submit">Search</button>
           </form>
-          <form method="get" action="/search" class="domain-filter-row">
+          <form method="get" action="/search" class="search-tools">
             <input type="hidden" name="q" value="{html.escape(q)}" />
-            <input name="domain" value="{html.escape(domain)}" placeholder="Optional domain filter, e.g. wikipedia.org" />
-            <button type="submit">Apply Domain Filter</button>
+            <input name="domain" value="{html.escape(domain)}" placeholder="Site filter (optional), e.g. wikipedia.org" />
+            <button type="submit">Apply</button>
           </form>
+          {("<div class='search-count muted'>Results: " + str(len(hits)) + "</div>") if q.strip() else ""}
         </section>
-        <section class="panel">{results_html}</section>
+        <section class="search-results">{results_html}</section>
         """
         self._send_html(200, self._layout("Search", body, active_nav="search"))
 
-    def _render_status_page(self, query_params: dict[str, list[str]]) -> None:
-        crawler_id = query_params.get("id", [""])[0].strip()
-        state_filter = query_params.get("state", ["all"])[0]
-        domain_filter = query_params.get("domain", [""])[0]
-        text_filter = query_params.get("q", [""])[0]
-        flash = query_params.get("flash", [""])[0]
+    def _render_status_page(self, flash: str = "") -> None:
         overview = self.manager.get_overview()
-        jobs = self.manager.filter_crawlers(state=state_filter, domain=domain_filter, query=text_filter)
-
-        rows = []
+        jobs = self.manager.list_crawlers()
+        cards = []
         for job in jobs:
-            rows.append(
+            crawler_id = str(job["crawler_id"])
+            state = str(job["state"])
+            cards.append(
                 f"""
-                <tr>
-                  <td><a href="/status?id={html.escape(job["crawler_id"])}#detail">{html.escape(job["crawler_id"])}</a></td>
-                  <td><span class="state state-{html.escape(job["state"])}">{html.escape(job["state"])}</span></td>
-                  <td class="trace-url">{html.escape(job["origin"])}</td>
-                  <td>{_format_dt(job["created_at"])}</td>
-                  <td>
-                    <form method="post" action="/crawler/delete" style="display:inline;">
-                      <input type="hidden" name="crawler_id" value="{html.escape(job["crawler_id"])}" />
-                      <button type="submit" class="action-btn danger-btn">Delete</button>
-                    </form>
-                  </td>
-                </tr>
+                <article class="crawler-card">
+                  <div class="crawler-card-head">
+                    <a class="crawler-id-link" href="/status/{html.escape(crawler_id)}">{html.escape(crawler_id)}</a>
+                    <span class="state state-{html.escape(state)}" data-crawler-id="{html.escape(crawler_id)}">{html.escape(state)}</span>
+                  </div>
+                  <div class="crawler-origin">{html.escape(str(job["origin"]))}</div>
+                  <div class="crawler-meta">Created: {html.escape(_format_dt(job.get("created_at")))}</div>
+                  <div class="table-actions">{self._crawler_control_buttons_html(crawler_id, state)}</div>
+                </article>
                 """
             )
-        detail = ""
-        if crawler_id:
-            status = self.manager.get_crawler_status(crawler_id)
-            if status is None:
-                detail = f"<section class='panel'><p>Crawler not found: {html.escape(crawler_id)}</p></section>"
-            else:
-                detail = self._crawler_detail_html(status)
-
-        filters = f"""
-        <form method="get" action="/status" class="status-filters">
-          <input name="q" value="{html.escape(text_filter)}" placeholder="Search by origin..." />
-          <input name="domain" value="{html.escape(domain_filter)}" placeholder="Domain filter..." />
-          <select name="state">
-            {self._state_option("all", state_filter)}
-            {self._state_option("running", state_filter)}
-            {self._state_option("completed", state_filter)}
-            {self._state_option("failed", state_filter)}
-            {self._state_option("interrupted", state_filter)}
-          </select>
-          <button type="submit">Filter</button>
-        </form>
-        """
+        list_html = "".join(cards) or "<p class='muted'>No crawlers yet.</p>"
         body = f"""
         {self._flash_html(flash)}
         {self._overview_cards_html(overview)}
         <section class="panel">
-          <div class="panel-title-row"><h2>Status</h2><div class="muted">Last update: <span id="last-update">{html.escape(_format_dt(overview['updated_at']))}</span></div></div>
-          <form method="post" action="/data/clear" style="margin-bottom:10px;">
+          <div class="panel-title-row"><h2>All Crawlers</h2><div class="muted">Last update: <span id="last-update">{html.escape(_format_dt(overview['updated_at']))}</span></div></div>
+          <p class="muted">Each crawler has its own detail page. Click any crawler ID to open it.</p>
+          <form method="post" action="/data/clear" style="margin-bottom:14px;">
             <button type="submit" class="danger-btn">Clear All Data</button>
           </form>
-          {filters}
-          <table><thead><tr><th>ID</th><th>State</th><th>Origin</th><th>Created</th><th>Actions</th></tr></thead><tbody>{''.join(rows)}</tbody></table>
+          <div class="crawler-grid">{list_html}</div>
         </section>
-        {detail}
         """
-        self._send_html(200, self._layout("Status", body, active_nav="status", crawler_id=crawler_id or None))
+        self._send_html(200, self._layout("Status", body, active_nav="status"))
+
+    def _render_crawler_status_page(self, *, crawler_id: str, flash: str = "") -> None:
+        overview = self.manager.get_overview()
+        status = self.manager.get_crawler_status(crawler_id)
+        if status is None:
+            body = f"""
+            {self._flash_html(flash)}
+            <section class="panel"><p>Crawler not found: {html.escape(crawler_id)}</p></section>
+            """
+            self._send_html(404, self._layout("Crawler Not Found", body, active_nav="status"))
+            return
+        body = f"""
+        {self._flash_html(flash)}
+        {self._overview_cards_html(overview)}
+        {self._crawler_detail_html(status)}
+        """
+        self._send_html(200, self._layout("Crawler Status", body, active_nav="status", crawler_id=crawler_id))
 
     def _state_option(self, value: str, current: str) -> str:
         selected = "selected" if value == current else ""
@@ -272,6 +368,60 @@ class CrawlerWebHandler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get("Content-Length", "0"))
         raw = self.rfile.read(content_length).decode("utf-8", errors="replace")
         return parse_qs(raw, keep_blank_values=True)
+
+    def _read_json(self) -> dict:
+        content_length = int(self.headers.get("Content-Length", "0"))
+        if content_length <= 0:
+            return {}
+        raw = self.rfile.read(content_length).decode("utf-8", errors="replace")
+        if not raw.strip():
+            return {}
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        if isinstance(payload, dict):
+            return payload
+        return {}
+
+    def _is_api_search_request(self, query_params: dict[str, list[str]]) -> bool:
+        return any(key in query_params for key in ("query", "pageLimit", "pageOffset", "sortBy"))
+
+    def _handle_search_api(self, query_params: dict[str, list[str]]) -> None:
+        query = query_params.get("query", [""])[0].strip()
+        page_limit = _as_int(query_params.get("pageLimit", [""])[0], 10, minimum=1)
+        page_offset = _as_int(query_params.get("pageOffset", [""])[0], 0, minimum=0)
+        sort_by = query_params.get("sortBy", ["relevance"])[0].strip().lower() or "relevance"
+        if sort_by not in {"relevance", "recent"}:
+            sort_by = "relevance"
+
+        if not query:
+            self._send_json(
+                400,
+                {
+                    "error": "query-required",
+                    "message": "Provide query parameter, e.g. /search?query=python&pageLimit=10&pageOffset=0",
+                },
+            )
+            return
+
+        hits = self.manager.search_with_filters(
+            query=query,
+            limit=page_limit,
+            offset=page_offset,
+            sort_by=sort_by,
+        )
+        self._send_json(
+            200,
+            {
+                "query": query,
+                "sortBy": sort_by,
+                "pageLimit": page_limit,
+                "pageOffset": page_offset,
+                "results": hits,
+                "count": len(hits),
+            },
+        )
 
     def _send_json(self, status_code: int, payload: dict) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -310,16 +460,27 @@ class CrawlerWebHandler(BaseHTTPRequestHandler):
             )
         rows = []
         for item in jobs:
+            crawler_id = str(item.get("crawler_id", ""))
+            state = str(item.get("state", ""))
             rows.append(
-                f"<tr><td><a href='/status?id={html.escape(item.get('crawler_id', ''))}#detail'>{html.escape(item.get('crawler_id', ''))}</a></td><td>{html.escape(item.get('state', ''))}</td><td class='trace-url'>{html.escape(item.get('origin', ''))}</td><td>{_format_dt(item.get('created_at'))}</td></tr>"
+                "<tr>"
+                f"<td><a href='/status/{html.escape(crawler_id)}'>{html.escape(crawler_id)}</a></td>"
+                f"<td><span class='state state-{html.escape(state)}' data-crawler-id='{html.escape(crawler_id)}'>{html.escape(state)}</span></td>"
+                f"<td class='trace-url'>{html.escape(str(item.get('origin', '')))}</td>"
+                f"<td>{_format_dt(item.get('created_at'))}</td>"
+                f"<td><div class='table-actions'>{self._crawler_control_buttons_html(crawler_id, state)}</div></td>"
+                "</tr>"
             )
         return (
             "<section class='panel'><h3>Recently Created Crawlers</h3>"
-            "<table><thead><tr><th>ID</th><th>State</th><th>Origin</th><th>Created</th></tr></thead>"
+            "<table><thead><tr><th>ID</th><th>State</th><th>Origin</th><th>Created</th><th>Actions</th></tr></thead>"
             f"<tbody>{''.join(rows)}</tbody></table></section>"
         )
 
     def _crawler_detail_html(self, status: dict[str, Any]) -> str:
+        crawler_id = str(status.get("crawler_id") or "")
+        state = str(status.get("state") or "")
+        controls_html = self._crawler_control_buttons_html(crawler_id, state)
         summary_items = [
             ("State", str(status.get("state", "-")), "state"),
             ("Visited", str(status.get("pages_crawled", 0)), "pages_crawled"),
@@ -338,12 +499,14 @@ class CrawlerWebHandler(BaseHTTPRequestHandler):
         return f"""
         <section class="panel" id="detail">
           <div class="panel-title-row">
-            <h2>Crawler Details</h2>
+            <h2>Crawler {html.escape(crawler_id)}</h2>
             <div class="detail-actions">
+              <a href="/status" class="action-link">Back to all crawlers</a>
               <label class="live-toggle"><input type="checkbox" id="auto-refresh-toggle" checked /> Auto Refresh</label>
               <button type="button" id="refresh-detail-btn" class="action-btn">Refresh Now</button>
             </div>
           </div>
+          <div class="detail-controls">{controls_html}</div>
           <div class="timeline">
             <div>Created: <span class="detail-created_at">{html.escape(_format_dt(status.get("created_at")))}</span></div>
             <div>Started: <span class="detail-started_at">{html.escape(_format_dt(status.get("started_at")))}</span></div>
@@ -395,15 +558,59 @@ class CrawlerWebHandler(BaseHTTPRequestHandler):
 
     def _flash_html(self, flash: str) -> str:
         text_map = {
-            "started": "Crawler started successfully.",
-            "deleted": "Crawler deleted.",
-            "delete_failed": "Delete failed: crawler may still be running.",
+            "started": "Started.",
+            "paused": "Paused.",
+            "resumed": "Resumed.",
+            "stopped": "Stopped.",
+            "pause_failed": "Pause failed.",
+            "resume_failed": "Resume failed.",
+            "stop_failed": "Stop failed.",
+            "deleted": "Deleted.",
+            "delete_failed": "Delete failed.",
             "cleared": "All data cleared.",
-            "clear_blocked": "Stop running crawlers before clearing data.",
+            "clear_blocked": "Stop running crawlers first.",
         }
         if flash not in text_map:
             return ""
         return f"<div id='toast' class='toast'>{html.escape(text_map[flash])}</div>"
+
+    def _crawler_control_buttons_html(self, crawler_id: str, state: str) -> str:
+        cid = html.escape(crawler_id)
+        state_key = html.escape((state or "").lower())
+        forms: list[str] = []
+
+        if state == "running":
+            forms.append(
+                "<form method='post' action='/crawler/pause' class='crawler-control-form' style='display:inline;'>"
+                f"<input type='hidden' name='crawler_id' value='{cid}' />"
+                "<button type='submit' class='action-btn' data-intent='pause'>Pause</button>"
+                "</form>"
+            )
+            forms.append(
+                "<form method='post' action='/crawler/stop' class='crawler-control-form' style='display:inline;'>"
+                f"<input type='hidden' name='crawler_id' value='{cid}' />"
+                "<button type='submit' class='action-btn danger-btn' data-intent='stop'>Stop</button>"
+                "</form>"
+            )
+        elif state in {"paused", "stopped", "interrupted", "failed"}:
+            forms.append(
+                "<form method='post' action='/crawler/resume' class='crawler-control-form' style='display:inline;'>"
+                f"<input type='hidden' name='crawler_id' value='{cid}' />"
+                "<button type='submit' class='action-btn' data-intent='resume'>Resume</button>"
+                "</form>"
+            )
+
+        forms.append(
+            "<form method='post' action='/crawler/delete' style='display:inline;'>"
+            f"<input type='hidden' name='crawler_id' value='{cid}' />"
+            "<button type='submit' class='action-btn danger-btn'>Delete</button>"
+            "</form>"
+        )
+        return (
+            f"<div class='control-set' data-crawler-id='{cid}' data-crawler-state='{state_key}'>"
+            + "".join(forms)
+            + "</div>"
+        )
 
     def _layout(
         self,
@@ -611,9 +818,22 @@ class CrawlerWebHandler(BaseHTTPRequestHandler):
             .action-btn {{
               width: auto;
               padding: 6px 10px;
-              margin-left: 6px;
+              margin-left: 0;
               font-size: 12px;
               border-radius: 9px;
+            }}
+            .action-btn.is-loading {{
+              opacity: 0.75;
+              pointer-events: none;
+            }}
+            .action-link {{
+              color: var(--primary);
+              text-decoration: none;
+              font-weight: 600;
+              font-size: 13px;
+            }}
+            .action-link:hover {{
+              text-decoration: underline;
             }}
             .danger-btn {{
               background: linear-gradient(135deg, #a21212, #dc3030);
@@ -622,36 +842,95 @@ class CrawlerWebHandler(BaseHTTPRequestHandler):
               font-size: 13px;
               color: var(--muted);
             }}
-            .search-hero {{
+            .search-shell {{
+              width: min(780px, 100%);
+              margin: 22px auto 18px;
               text-align: center;
             }}
-            .brand-search {{
-              font-size: 46px;
-              margin: 6px 0 12px;
-              letter-spacing: -1px;
+            .search-shell-home {{
+              margin-top: 90px;
             }}
-            .result {{
+            .search-brand {{
+              font-size: clamp(38px, 8vw, 64px);
+              font-weight: 800;
+              letter-spacing: -1.6px;
+              margin-bottom: 18px;
+            }}
+            .search-brand span {{
+              color: var(--primary);
+            }}
+            .search-google-bar {{
+              display: grid;
+              grid-template-columns: 1fr auto;
+              align-items: center;
+              gap: 10px;
+              padding: 10px;
+              border-radius: 999px;
               border: 1px solid var(--border);
-              border-radius: 12px;
-              padding: 12px;
+              background: var(--panel);
+              box-shadow: var(--shadow);
+            }}
+            .search-google-bar input {{
+              border: none;
+              background: transparent;
+              padding: 12px 14px;
+              border-radius: 999px;
+            }}
+            .search-google-bar input:focus {{
+              outline: none;
+            }}
+            .search-google-bar button {{
+              width: auto;
+              border-radius: 999px;
+              padding: 10px 16px;
+            }}
+            .search-tools {{
+              margin-top: 12px;
+              display: grid;
+              grid-template-columns: 1fr auto;
+              gap: 8px;
+              align-items: center;
+            }}
+            .search-tools button {{
+              width: auto;
+              padding: 10px 14px;
+            }}
+            .search-count {{
+              margin-top: 10px;
+              font-size: 13px;
+            }}
+            .search-results {{
+              width: min(860px, 100%);
+              margin: 0 auto;
+            }}
+            .search-hit {{
+              border: 1px solid var(--border);
+              border-radius: 14px;
+              padding: 12px 14px;
               margin-bottom: 10px;
               background: color-mix(in srgb, var(--panel) 94%, #fff 6%);
             }}
-            .title {{
+            .hit-title {{
               color: color-mix(in srgb, var(--primary) 80%, #1a0dab 20%);
               text-decoration: none;
-              font-size: 20px;
+              font-size: 21px;
               font-weight: 600;
+              line-height: 1.3;
+              display: block;
+              margin-top: 2px;
             }}
-            .url {{
+            .hit-title:hover {{
+              text-decoration: underline;
+            }}
+            .hit-url {{
               color: var(--ok);
-              margin-top: 4px;
               font-size: 13px;
+              word-break: break-all;
             }}
-            .snippet {{
+            .hit-snippet {{
               color: var(--muted);
-              margin-top: 6px;
-              line-height: 1.45;
+              margin-top: 7px;
+              line-height: 1.5;
             }}
             mark {{
               background: color-mix(in srgb, #ffe66b 70%, transparent);
@@ -686,6 +965,42 @@ class CrawlerWebHandler(BaseHTTPRequestHandler):
             .state-completed {{ color: var(--ok); }}
             .state-failed {{ color: var(--danger); }}
             .state-interrupted {{ color: #c57b00; }}
+            .state-paused {{ color: #a66a00; }}
+            .state-stopped {{ color: #8a3fd4; }}
+            .crawler-grid {{
+              display: grid;
+              grid-template-columns: repeat(2, minmax(0, 1fr));
+              gap: 12px;
+            }}
+            .crawler-card {{
+              border: 1px solid var(--border);
+              border-radius: 14px;
+              padding: 12px;
+              background: color-mix(in srgb, var(--panel) 94%, #fff 6%);
+            }}
+            .crawler-card-head {{
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+              gap: 8px;
+              margin-bottom: 8px;
+            }}
+            .crawler-id-link {{
+              color: var(--primary);
+              text-decoration: none;
+              font-weight: 700;
+            }}
+            .crawler-origin {{
+              font-size: 13px;
+              color: var(--muted);
+              word-break: break-word;
+              margin-bottom: 8px;
+            }}
+            .crawler-meta {{
+              font-size: 12px;
+              color: var(--muted);
+              margin-bottom: 10px;
+            }}
             .progress-wrap {{
               margin: 10px 0;
             }}
@@ -715,6 +1030,14 @@ class CrawlerWebHandler(BaseHTTPRequestHandler):
               margin-bottom: 12px;
               font-weight: 600;
             }}
+            .toast-inline {{
+              position: fixed;
+              right: 16px;
+              bottom: 16px;
+              z-index: 60;
+              min-width: 160px;
+              max-width: 340px;
+            }}
             .mobile-nav {{
               display: none;
             }}
@@ -722,6 +1045,18 @@ class CrawlerWebHandler(BaseHTTPRequestHandler):
               display: flex;
               align-items: center;
               gap: 10px;
+            }}
+            .detail-controls {{
+              display: flex;
+              flex-wrap: wrap;
+              gap: 8px;
+              margin-top: 10px;
+              margin-bottom: 8px;
+            }}
+            .table-actions {{
+              display: flex;
+              flex-wrap: wrap;
+              gap: 8px;
             }}
             .live-toggle {{
               display: flex;
@@ -760,10 +1095,20 @@ class CrawlerWebHandler(BaseHTTPRequestHandler):
               .kpis {{
                 grid-template-columns: repeat(2, minmax(0, 1fr));
               }}
+              .crawler-grid {{
+                grid-template-columns: 1fr;
+              }}
               .search-controls {{
                 grid-template-columns: 1fr;
               }}
               .domain-filter-row {{
+                grid-template-columns: 1fr;
+              }}
+              .search-google-bar {{
+                grid-template-columns: 1fr;
+                border-radius: 16px;
+              }}
+              .search-tools {{
                 grid-template-columns: 1fr;
               }}
               .status-filters {{
@@ -850,6 +1195,21 @@ class CrawlerWebHandler(BaseHTTPRequestHandler):
               if (toast) {{
                 setTimeout(() => toast.style.display = "none", 2400);
               }}
+              function showToast(message) {{
+                let el = document.getElementById("inline-toast");
+                if (!el) {{
+                  el = document.createElement("div");
+                  el.id = "inline-toast";
+                  el.className = "toast toast-inline";
+                  document.body.appendChild(el);
+                }}
+                el.textContent = message;
+                el.style.display = "block";
+                clearTimeout(window.__crawlToastTimer);
+                window.__crawlToastTimer = setTimeout(() => {{
+                  if (el) el.style.display = "none";
+                }}, 1600);
+              }}
 
               async function refreshOverview() {{
                 try {{
@@ -878,6 +1238,16 @@ class CrawlerWebHandler(BaseHTTPRequestHandler):
               const crawlerId = document.body.getAttribute("data-crawler-id");
               const autoRefreshToggle = document.getElementById("auto-refresh-toggle");
               const refreshDetailBtn = document.getElementById("refresh-detail-btn");
+              const intentText = {{
+                pause: "Pausing...",
+                resume: "Resuming...",
+                stop: "Stopping...",
+              }};
+              const doneText = {{
+                pause: "Paused.",
+                resume: "Resumed.",
+                stop: "Stopped.",
+              }};
               function humanEventName(eventType) {{
                 const mapping = {{
                   queue_enqueue: "Added to queue",
@@ -905,6 +1275,50 @@ class CrawlerWebHandler(BaseHTTPRequestHandler):
               function setDetailValue(key, value) {{
                 const el = document.querySelector(`.detail-${{key}}`);
                 if (el) el.textContent = value ?? "-";
+              }}
+              function setStateBadgeClasses(el, state) {{
+                if (!el) return;
+                const known = ["running", "completed", "failed", "interrupted", "paused", "stopped"];
+                known.forEach((name) => el.classList.remove(`state-${{name}}`));
+                el.classList.add(`state-${{state}}`);
+              }}
+              function controlButtonsHtml(id, state) {{
+                const cid = escapeHtml(id || "");
+                const st = String(state || "").toLowerCase();
+                let out = "";
+                if (st === "running") {{
+                  out += "<form method='post' action='/crawler/pause' class='crawler-control-form' style='display:inline;'>" +
+                    `<input type='hidden' name='crawler_id' value='${{cid}}' />` +
+                    "<button type='submit' class='action-btn' data-intent='pause'>Pause</button></form>";
+                  out += "<form method='post' action='/crawler/stop' class='crawler-control-form' style='display:inline;'>" +
+                    `<input type='hidden' name='crawler_id' value='${{cid}}' />` +
+                    "<button type='submit' class='action-btn danger-btn' data-intent='stop'>Stop</button></form>";
+                }} else if (["paused", "stopped", "interrupted", "failed"].includes(st)) {{
+                  out += "<form method='post' action='/crawler/resume' class='crawler-control-form' style='display:inline;'>" +
+                    `<input type='hidden' name='crawler_id' value='${{cid}}' />` +
+                    "<button type='submit' class='action-btn' data-intent='resume'>Resume</button></form>";
+                }}
+                out += "<form method='post' action='/crawler/delete' style='display:inline;'>" +
+                  `<input type='hidden' name='crawler_id' value='${{cid}}' />` +
+                  "<button type='submit' class='action-btn danger-btn'>Delete</button></form>";
+                return out;
+              }}
+              function updateCrawlerControls(id, state) {{
+                const nextState = String(state || "").toLowerCase();
+                document.querySelectorAll(".control-set").forEach((node) => {{
+                  if ((node.getAttribute("data-crawler-id") || "") !== id) return;
+                  node.setAttribute("data-crawler-state", nextState);
+                  node.innerHTML = controlButtonsHtml(id, nextState);
+                }});
+                bindCrawlerControlForms();
+                document.querySelectorAll(".state[data-crawler-id]").forEach((node) => {{
+                  if ((node.getAttribute("data-crawler-id") || "") !== id) return;
+                  node.textContent = nextState;
+                  setStateBadgeClasses(node, nextState);
+                }});
+                if (document.body.getAttribute("data-crawler-id") === id) {{
+                  setDetailValue("state", nextState);
+                }}
               }}
               function renderVisitTrace(items) {{
                 const body = document.getElementById("visit-trace-body");
@@ -934,6 +1348,7 @@ class CrawlerWebHandler(BaseHTTPRequestHandler):
                   const res = await fetch(`/api/status?id=${{encodeURIComponent(crawlerId)}}`, {{ cache: "no-store" }});
                   if (!res.ok) return;
                   const data = await res.json();
+                  updateCrawlerControls(crawlerId, data.state || "");
                   setDetailValue("state", data.state || "-");
                   setDetailValue("pages_crawled", data.pages_crawled ?? 0);
                   setDetailValue("pages_indexed", data.pages_indexed ?? 0);
@@ -951,8 +1366,95 @@ class CrawlerWebHandler(BaseHTTPRequestHandler):
                   if (autoRefreshToggle && data.state !== "running") {{
                     autoRefreshToggle.checked = false;
                   }}
+                  return data;
                 }} catch (_e) {{}}
+                return null;
               }}
+
+              async function fetchCrawlerState(id) {{
+                try {{
+                  const res = await fetch(`/crawler/status/${{encodeURIComponent(id)}}`, {{ cache: "no-store" }});
+                  if (!res.ok) return null;
+                  const data = await res.json();
+                  return String(data.state || "").toLowerCase() || null;
+                }} catch (_e) {{
+                  return null;
+                }}
+              }}
+              async function waitForStableState(id, intent) {{
+                if (intent === "resume") {{
+                  return (await fetchCrawlerState(id)) || "running";
+                }}
+                const attempts = 10;
+                for (let i = 0; i < attempts; i += 1) {{
+                  const state = await fetchCrawlerState(id);
+                  if (state && state !== "running") return state;
+                  await new Promise((resolve) => setTimeout(resolve, 220));
+                }}
+                return (await fetchCrawlerState(id)) || (intent === "pause" ? "paused" : "stopped");
+              }}
+
+              async function handleCrawlerControlSubmit(form, ev) {{
+                ev.preventDefault();
+                const input = form.querySelector('input[name="crawler_id"]');
+                const button = form.querySelector("button[type='submit']");
+                if (!input || !button) {{
+                  form.submit();
+                  return;
+                }}
+                const id = (input.value || "").trim();
+                if (!id) {{
+                  form.submit();
+                  return;
+                }}
+                const action = form.getAttribute("action") || "";
+                let intent = "pause";
+                if (action.includes("/resume")) intent = "resume";
+                if (action.includes("/stop")) intent = "stop";
+                const apiUrl = `/crawler/${{intent}}/${{encodeURIComponent(id)}}`;
+
+                const oldLabel = button.textContent || "";
+                button.classList.add("is-loading");
+                button.textContent = intentText[intent] || "Working...";
+                button.disabled = true;
+                showToast(intentText[intent] || "Working...");
+                try {{
+                  const res = await fetch(apiUrl, {{
+                    method: "POST",
+                    headers: {{ "Content-Type": "application/json" }},
+                    body: "{{}}",
+                    cache: "no-store",
+                  }});
+                  const data = await res.json().catch(() => ({{}}));
+                  if (res.ok && data.ok) {{
+                    const stableState = await waitForStableState(id, intent);
+                    updateCrawlerControls(id, stableState);
+                    showToast(doneText[intent] || "Done.");
+                    if (page === "status" && crawlerId && crawlerId === id) {{
+                      await refreshCrawlerDetail();
+                    }}
+                    return;
+                  }}
+                  showToast("Action failed.");
+                }} catch (_e) {{
+                  showToast("Network error.");
+                }}
+                button.classList.remove("is-loading");
+                button.textContent = oldLabel;
+                button.disabled = false;
+              }}
+
+              function bindCrawlerControlForms() {{
+                document.querySelectorAll(".crawler-control-form").forEach((form) => {{
+                  if (form.getAttribute("data-bound") === "1") return;
+                  form.setAttribute("data-bound", "1");
+                  form.addEventListener("submit", (ev) => {{
+                    handleCrawlerControlSubmit(form, ev);
+                  }});
+                }});
+              }}
+              bindCrawlerControlForms();
+
               refreshDetailBtn?.addEventListener("click", refreshCrawlerDetail);
               if (page === "status" && crawlerId) {{
                 setInterval(() => {{

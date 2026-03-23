@@ -34,6 +34,8 @@ class Document:
     title: str
     content: str
     crawl_run_id: str | None = None
+    origin: str = ""
+    depth: int = 0
     indexed_at: datetime = field(default_factory=utc_now)
 
 

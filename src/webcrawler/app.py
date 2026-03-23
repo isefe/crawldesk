@@ -57,6 +57,8 @@ class App:
         query: str,
         limit: int = 10,
         *,
+        offset: int = 0,
+        sort_by: str = "relevance",
         domain: str | None = None,
         crawl_run_id: str | None = None,
         indexed_from: str | None = None,
@@ -66,6 +68,8 @@ class App:
         return self.search_service.search(
             query=query,
             limit=limit,
+            offset=offset,
+            sort_by=sort_by,
             domain=domain,
             crawl_run_id=crawl_run_id,
             indexed_from=indexed_from,

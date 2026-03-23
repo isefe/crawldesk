@@ -20,6 +20,8 @@ class BaseIndexStorage(ABC):
         query: str,
         limit: int = 10,
         *,
+        offset: int = 0,
+        sort_by: str = "relevance",
         domain: str | None = None,
         crawl_run_id: str | None = None,
         indexed_from: str | None = None,

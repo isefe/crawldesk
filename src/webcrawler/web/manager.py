@@ -34,6 +34,8 @@ class CrawlerJob:
     finished_at: str | None = None
     checkpoint_path: str = ""
     thread: Thread | None = None
+    stop_requested: bool = False
+    stop_reason: str | None = None
 
 
 class CrawlerManager:
@@ -70,6 +72,10 @@ class CrawlerManager:
         return crawler_id
 
     def resume_crawler(self, crawler_id: str) -> bool:
+        with self._lock:
+            running = self._jobs.get(crawler_id)
+            if running and running.state == "running":
+                return False
         with self._meta_connect() as conn:
             row = conn.execute(
                 """
@@ -94,6 +100,15 @@ class CrawlerManager:
         )
         return True
 
+    def stop_crawler(self, crawler_id: str) -> bool:
+        return self._request_stop(crawler_id=crawler_id, reason="stopped")
+
+    def pause_crawler(self, crawler_id: str) -> bool:
+        return self._request_stop(crawler_id=crawler_id, reason="paused")
+
+    def resume_from_files(self, crawler_id: str) -> bool:
+        return self.resume_crawler(crawler_id)
+
     def delete_crawler(self, crawler_id: str) -> bool:
         with self._lock:
             running = self._jobs.get(crawler_id)
@@ -102,6 +117,14 @@ class CrawlerManager:
             self._jobs.pop(crawler_id, None)
 
         with self._meta_connect() as conn:
+            url_rows = conn.execute(
+                """
+                SELECT DISTINCT url
+                FROM crawler_events
+                WHERE crawler_id = ? AND event_type = 'visit_start'
+                """,
+                (crawler_id,),
+            ).fetchall()
             conn.execute("DELETE FROM crawler_events WHERE crawler_id = ?", (crawler_id,))
             conn.execute("DELETE FROM crawler_jobs WHERE crawler_id = ?", (crawler_id,))
             conn.commit()
@@ -110,17 +133,10 @@ class CrawlerManager:
         storage.initialize()
         with storage._connect() as conn:  # noqa: SLF001
             conn.execute("DELETE FROM documents WHERE crawl_run_id = ?", (crawler_id,))
-            with self._meta_connect() as meta_conn:
-                url_rows = meta_conn.execute(
-                    """
-                    SELECT DISTINCT url
-                    FROM crawler_events
-                    WHERE crawler_id = ? AND event_type = 'visit_start'
-                    """,
-                    (crawler_id,),
-                ).fetchall()
             if url_rows:
                 conn.executemany("DELETE FROM documents WHERE url = ?", url_rows)
+                conn.executemany("DELETE FROM word_entries WHERE url = ?", url_rows)
+            storage._write_storage_files(conn)  # noqa: SLF001
             conn.commit()
 
         checkpoint = Path("./data/checkpoints") / f"{crawler_id}.json"
@@ -143,6 +159,8 @@ class CrawlerManager:
         storage.initialize()
         with storage._connect() as conn:  # noqa: SLF001
             conn.execute("DELETE FROM documents")
+            conn.execute("DELETE FROM word_entries")
+            storage._write_storage_files(conn)  # noqa: SLF001
             conn.commit()
 
         checkpoint_dir = Path("./data/checkpoints")
@@ -271,6 +289,8 @@ class CrawlerManager:
         *,
         query: str,
         limit: int = 20,
+        offset: int = 0,
+        sort_by: str = "relevance",
         domain: str | None = None,
         crawl_run_id: str | None = None,
         indexed_from: str | None = None,
@@ -281,12 +301,30 @@ class CrawlerManager:
         hits = storage.search(
             query=query,
             limit=limit,
+            offset=offset,
+            sort_by=sort_by,
             domain=domain,
             crawl_run_id=crawl_run_id,
             indexed_from=indexed_from,
             indexed_to=indexed_to,
         )
-        return [{"url": h.url, "title": h.title, "snippet": h.snippet, "score": h.score} for h in hits]
+        return [
+            {
+                "url": h.url,
+                "title": h.title,
+                "snippet": h.snippet,
+                "relevance_score": h.score,
+                "score": h.score,
+            }
+            for h in hits
+        ]
+
+    def random_word(self) -> str | None:
+        storage = SQLiteIndexStorage(self._base_config.index_db_path)
+        storage.initialize()
+        with storage._connect() as conn:  # noqa: SLF001
+            row = conn.execute("SELECT word FROM word_entries ORDER BY RANDOM() LIMIT 1").fetchone()
+        return str(row[0]) if row and row[0] else None
 
     def get_overview(self) -> dict[str, Any]:
         with self._meta_connect() as conn:
@@ -360,6 +398,8 @@ class CrawlerManager:
         queue_capacity: int,
         resume: bool,
     ) -> None:
+        storage = SQLiteIndexStorage(self._base_config.index_db_path)
+        storage.ensure_storage_files()
         checkpoint_dir = Path("./data/checkpoints")
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
         checkpoint_path = checkpoint_dir / f"{crawler_id}.json"
@@ -409,7 +449,10 @@ class CrawlerManager:
                     crawl_run_id=crawler_id,
                 )
             )
-            job.state = "completed"
+            if job.stop_requested:
+                job.state = job.stop_reason or "stopped"
+            else:
+                job.state = "completed"
             job.finished_at = _utc_now_iso()
             job.error = None
         except Exception as exc:  # noqa: BLE001
@@ -419,6 +462,16 @@ class CrawlerManager:
             logger.info("Crawl failed: %s", job.error)
         finally:
             self._upsert_job(job)
+
+    def _request_stop(self, *, crawler_id: str, reason: str) -> bool:
+        with self._lock:
+            job = self._jobs.get(crawler_id)
+            if job is None or job.state != "running" or job.app is None:
+                return False
+            job.stop_requested = True
+            job.stop_reason = reason
+            job.app.crawler.request_stop()
+        return True
 
     def _build_event_sink(self, crawler_id: str):
         def _sink(event: dict[str, Any]) -> None:

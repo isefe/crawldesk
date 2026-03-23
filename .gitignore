@@ -4,4 +4,6 @@ __pycache__/
 .venv/
 venv/
 
-data/
+data/*
+!data/storage/
+!data/storage/*.data

@@ -29,6 +29,7 @@ This gives you a crawler that is easy to understand, easy to extend, and reliabl
 - Index HTML pages into SQLite with upsert behavior.
 - Run search while indexing continues.
 - Persist jobs, events, indexed documents, and checkpoints across restarts.
+- Pause/stop a crawler and resume from checkpoint without starting from scratch.
 - Delete individual crawlers or reset all data from the UI.
 
 ---
@@ -92,6 +93,9 @@ CrawlDesk stores durable state under `data/`:
 
 - `data/index.sqlite3`  
   Indexed documents used by search.
+- `data/storage/a.data ... z.data`  
+  Raw inverted-index shards. Each line format:
+  `word url origin depth frequency`
 - `data/crawler_meta.sqlite3`  
   Crawler jobs and human-readable event stream.
 - `data/checkpoints/<crawler_id>.json`  
@@ -109,7 +113,48 @@ Main pages:
 - `/search` -> Google-style search page with optional domain filter
 - `/status` -> crawler list, detailed logs, visited URLs, lifecycle metadata
 
+### UI Screenshots
+
+#### New Crawler
+
+![New Crawler](docs/screenshots/new-crawler.png)
+
+#### Search
+
+![Search](docs/screenshots/search.png)
+
+#### Status
+
+![Status](docs/screenshots/status.png)
+
+API highlights:
+
+- `POST /crawler/create`
+- `GET /crawler/status/{crawler_id}`
+- `POST /crawler/pause/{crawler_id}`
+- `POST /crawler/resume/{crawler_id}`
+- `POST /crawler/stop/{crawler_id}`
+- `POST /crawler/resume-from-files/{crawler_id}`
+- `GET /crawler/list`
+- `GET /crawler/stats`
+- `POST /crawler/clear`
+- `GET /search?query=<word>&pageLimit=10&pageOffset=0&sortBy=relevance`
+- `GET /search/random`
+
+Relevance formula for single-word API search:
+
+`score = (frequency * 10) + 1000 - (depth * 5)`
+
 UI is fully English, dark-mode first, and tuned for operational clarity.
+
+### Pause / Resume (Checkpoint Continuity)
+
+CrawlDesk saves crawler queue + seen URL state to checkpoint files so you can safely pause/stop and continue later.
+
+- `Pause`: temporarily stop an active crawler.
+- `Stop`: end the current run gracefully, keeping checkpoint data.
+- `Resume`: continue from the saved checkpoint instead of re-crawling from depth 0.
+- If the app/server is interrupted, crawler state is preserved and can be resumed after restart.
 
 ---
 
@@ -129,9 +174,9 @@ python app.py
 ```
 
 Open:
-- `http://127.0.0.1:8080/crawler/new`
-- `http://127.0.0.1:8080/search`
-- `http://127.0.0.1:8080/status`
+- `http://127.0.0.1:3600/crawler/new`
+- `http://127.0.0.1:3600/search`
+- `http://127.0.0.1:3600/status`
 
 ---
 

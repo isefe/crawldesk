@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from threading import Lock
+from threading import Event, Lock
 from typing import Any, Callable
 
 from webcrawler.config import AppConfig
@@ -42,7 +42,7 @@ class WebCrawlerService:
         self._event_order = 0
         self._pages_since_checkpoint = 0
         self._last_progress_logged = 0
-        self._stop_event = asyncio.Event()
+        self._stop_event = Event()
         self.event_sink: Callable[[dict[str, Any]], None] | None = None
 
     async def run(self, resume: bool = True) -> None:
@@ -66,7 +66,7 @@ class WebCrawlerService:
         self._event_order = 0
         self._pages_since_checkpoint = 0
         self._last_progress_logged = 0
-        self._stop_event = asyncio.Event()
+        self._stop_event = Event()
         crawl_run_id = self.page_storage.start_run(
             origin=normalized_origin,
             max_depth=max_depth,
@@ -98,7 +98,7 @@ class WebCrawlerService:
     def _bootstrap(self, origin: str, resume: bool) -> None:
         if resume:
             seen, pending = self.state_store.load()
-            if pending:
+            if pending or seen:
                 self.scheduler.restore(seen=seen, pending=pending)
                 for task in pending:
                     self._emit_event(
@@ -184,6 +184,8 @@ class WebCrawlerService:
                         title=result.title or result.url,
                         content=result.content,
                         crawl_run_id=crawl_run_id,
+                        origin=task.origin or result.url,
+                        depth=task.depth,
                     )
                 )
                 self.status_service.mark_page_indexed()
@@ -227,6 +229,9 @@ class WebCrawlerService:
                 if self._reached_page_limit():
                     self._stop_event.set()
                 self._maybe_save_checkpoint(force=self._stop_event.is_set() or self._is_fully_idle())
+
+    def request_stop(self) -> None:
+        self._stop_event.set()
 
     def _set_worker_activity(self, increase: bool) -> None:
         with self._counter_lock:

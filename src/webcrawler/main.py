@@ -39,11 +39,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     web_cmd = sub.add_parser("web", help="Run browser UI")
     web_cmd.add_argument("--host", default="127.0.0.1")
-    web_cmd.add_argument("--port", type=int, default=8080)
+    web_cmd.add_argument("--port", type=int, default=3600)
 
     start_cmd = sub.add_parser("start", help="User-friendly launcher for web UI")
     start_cmd.add_argument("--host", default="127.0.0.1")
-    start_cmd.add_argument("--port", type=int, default=8080)
+    start_cmd.add_argument("--port", type=int, default=3600)
     start_cmd.add_argument("--open-browser", action="store_true")
     start_cmd.add_argument("--max-port-tries", type=int, default=10)
     return parser

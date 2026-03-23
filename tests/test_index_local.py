@@ -71,6 +71,59 @@ class LocalCrawlerIndexTest(unittest.TestCase):
             self.assertTrue(any(url.endswith("/index.html") for url in urls))
             self.assertFalse(any(url.endswith("/c.html") for url in urls))
 
+    def test_resume_does_not_restart_from_scratch_when_checkpoint_has_only_seen(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "index.html").write_text(
+                '<html><head><title>Home</title></head><body>'
+                '<a href="/a.html">A</a>'
+                "</body></html>",
+                encoding="utf-8",
+            )
+            (root / "a.html").write_text(
+                "<html><head><title>A</title></head><body>A</body></html>",
+                encoding="utf-8",
+            )
+
+            old_cwd = os.getcwd()
+            os.chdir(tmp_dir)
+            server: ThreadingHTTPServer | None = None
+            try:
+                try:
+                    server = ThreadingHTTPServer(("127.0.0.1", 0), SimpleHTTPRequestHandler)
+                except PermissionError:
+                    self.skipTest("Socket bind is not permitted in this environment")
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                origin = f"http://127.0.0.1:{server.server_port}/index.html"
+
+                config = AppConfig(
+                    origin_url=origin,
+                    max_depth=2,
+                    max_pages=20,
+                    worker_count=1,
+                    queue_capacity=50,
+                    requests_per_second=20,
+                    index_db_path=Path(tmp_dir) / "data" / "index.sqlite3",
+                    checkpoint_path=Path(tmp_dir) / "data" / "checkpoint.json",
+                )
+                app = App(config)
+
+                # First run completes and writes checkpoint with seen URLs.
+                asyncio.run(app.index(origin=origin, max_depth=2, resume=False))
+                pages_before = len(app.list_crawled_pages())
+
+                # Resume should not re-seed origin when pending queue is empty.
+                asyncio.run(app.index(origin=origin, max_depth=2, resume=True))
+                pages_after = len(app.list_crawled_pages())
+            finally:
+                if server is not None:
+                    server.shutdown()
+                    server.server_close()
+                os.chdir(old_cwd)
+
+            self.assertEqual(pages_before, pages_after)
+
 
 if __name__ == "__main__":
     unittest.main()
